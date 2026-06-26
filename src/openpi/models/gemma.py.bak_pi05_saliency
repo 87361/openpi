@@ -290,20 +290,7 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(  # noqa: FBT002
-        self,
-        xs,
-        kv_cache,
-        layer_idx,
-        positions,
-        attn_mask,
-        adarms_cond,
-        deterministic=True,
-        steer_layer=-1,
-        steer_epsilon=0.0,
-        steer_vector=None,
-        steer_token_mask=None,
-    ):
+    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -343,22 +330,7 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        if xs[1] is not None and steer_vector is not None:
-            delta = steer_vector.astype(xs[1].dtype) * jnp.asarray(steer_epsilon, dtype=xs[1].dtype)
-            if steer_token_mask is not None:
-                token_mask = steer_token_mask.astype(xs[1].dtype)
-                while token_mask.ndim < xs[1].ndim:
-                    token_mask = token_mask[..., None]
-                delta = delta * token_mask
-            steered = xs[1] + delta
-            xs[1] = jnp.where(jnp.asarray(layer_idx == steer_layer), steered, xs[1])
-
-        if xs[1] is None:
-            trace_hidden = jnp.zeros((xs[0].shape[0], 0, self.configs[1].width), dtype=xs[0].dtype)
-        else:
-            trace_hidden = xs[1]
-
-        return xs, (kv_cache, trace_hidden)
+        return xs, kv_cache
 
 
 KVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
@@ -387,7 +359,7 @@ class Module(nn.Module):
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(6,),
+            static_argnums=(5,),  # 0=self, 6=deterministic
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
@@ -396,23 +368,17 @@ class Module(nn.Module):
             split_rngs={"params": True, "dropout": True},
             in_axes=(
                 0,
-                0,
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-            ),
+            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
             length=self.configs[0].depth,
         )(
             configs=self.configs,
             dropout=self.dropout,
             dropout_bdims=self.dropout_bdims,
         )
-        self.layer_indices = jnp.arange(self.configs[0].depth)
         self.final_norms = [RMSNorm(name=_name("final_norm", i)) for i in range(len(self.configs))]
 
     @at.typecheck
@@ -436,66 +402,13 @@ class Module(nn.Module):
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, (kv_cache, _) = self.layers(
-            embedded,
-            kv_cache,
-            self.layer_indices,
-            positions,
-            mask,
-            adarms_cond,
-            deterministic,
-            -1,
-            0.0,
-            None,
-            None,
-        )
+        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
         return [
             f(e, a)[0] if e is not None else e for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
         ], kv_cache
-
-    @at.typecheck
-    def call_with_trace(
-        self,
-        embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
-        positions: at.Int[at.Array, "b t"],
-        mask: at.Bool[at.Array, "b t s"],
-        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,
-        *,
-        kv_cache: KVCache | None = None,
-        deterministic: bool = True,
-        steer_layer: int = -1,
-        steer_epsilon: float = 0.0,
-        steer_vector: at.Float[at.Array, "..."] | None = None,
-        steer_token_mask: at.Float[at.Array, "..."] | None = None,
-    ):
-        embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
-        mask = jnp.asarray(mask)[:, None, :, :]
-        if adarms_cond is None:
-            adarms_cond = [None] * len(self.configs)
-
-        embedded, (kv_cache, hidden_stack) = self.layers(
-            embedded,
-            kv_cache,
-            self.layer_indices,
-            positions,
-            mask,
-            adarms_cond,
-            deterministic,
-            steer_layer,
-            steer_epsilon,
-            steer_vector,
-            steer_token_mask,
-        )
-
-        assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
-
-        outputs = [
-            f(e, a)[0] if e is not None else e for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
-        ]
-        return outputs, kv_cache, hidden_stack
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""

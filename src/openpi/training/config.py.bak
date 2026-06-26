@@ -19,7 +19,6 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
-import openpi.policies.g2_policy as g2_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.wbcd_aloha_policy as wbcd_aloha_policy
 import openpi.policies.wbcd_piper_x_policy as wbcd_piper_x_policy
@@ -340,34 +339,6 @@ class LeRobotWbcdPiperXDataConfig(LeRobotAlohaDataConfig):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
         )
-
-
-@dataclasses.dataclass(frozen=True)
-class LeRobotG2DataConfig(DataConfigFactory):
-    """Data config for Kuavo G2 LeRobot v2.1 datasets."""
-
-    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
-        default_factory=_transforms.Group
-    )
-    action_sequence_keys: Sequence[str] = ("actions",)
-    output_action_dim: int = 24
-
-    @override
-    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        data_transforms = _transforms.Group(
-            inputs=[g2_policy.G2Inputs()],
-            outputs=[g2_policy.G2Outputs(action_dim=self.output_action_dim)],
-        )
-        model_transforms = ModelTransformFactory()(model_config)
-
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            repack_transforms=self.repack_transforms,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-            action_sequence_keys=self.action_sequence_keys,
-        )
-
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotLiberoDataConfig(DataConfigFactory):
@@ -1696,93 +1667,6 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
-    TrainConfig(
-        name="pi05_g2_finetune",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32,
-            action_horizon=50,
-        ),
-        data=LeRobotG2DataConfig(
-            repo_id="kuavo_data/lerobot_0521_224",
-            base_config=DataConfig(prompt_from_task=True),
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "head_color",
-                                "cam_left_wrist": "hand_left_color",
-                                "cam_right_wrist": "hand_right_color",
-                            },
-                            "state": "state",
-                            "actions": "actions",
-                            "prompt": "prompt",
-                        }
-                    )
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=5e-5,
-            decay_steps=80_000,
-            decay_lr=0,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
-        num_train_steps=80_000,
-        batch_size=256,
-        save_interval=10000,
-        keep_period=40_000,
-        num_workers=8,
-    ),
-    TrainConfig(
-        name="pi05_kuavo_task1_zhuomian_50_lora",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32,
-            action_horizon=50,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        data=LeRobotG2DataConfig(
-            repo_id="kuavo_tianchi/task1_zhuomian_50_v21",
-            output_action_dim=16,
-            action_sequence_keys=("action",),
-            base_config=DataConfig(prompt_from_task=True),
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.head_cam_h",
-                                "cam_left_wrist": "observation.images.wrist_cam_l",
-                                "cam_right_wrist": "observation.images.wrist_cam_r",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                            "prompt": "prompt",
-                        }
-                    )
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        ema_decay=None,
-        num_train_steps=20_000,
-        batch_size=64,
-        save_interval=5_000,
-        keep_period=10_000,
-        fsdp_devices=4,
-        num_workers=8,
-    ),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
@@ -1791,20 +1675,6 @@ _CONFIGS = [
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
-
-
-# === evorl-auto-config BEGIN (do not edit by hand) ===
-try:
-    from .config_generated import _AUTO_CONFIGS as _EVORL_AUTO_CONFIGS  # type: ignore[attr-defined]
-    for _evorl_cfg in _EVORL_AUTO_CONFIGS:
-        if _evorl_cfg.name in _CONFIGS_DICT:
-            continue
-        _CONFIGS.append(_evorl_cfg)
-        _CONFIGS_DICT[_evorl_cfg.name] = _evorl_cfg
-except Exception:  # noqa: BLE001
-    pass
-# === evorl-auto-config END ===
-
 
 
 def cli() -> TrainConfig:

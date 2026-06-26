@@ -145,6 +145,20 @@ def create_torch_dataset(
         },
     )
 
+    if not data_config.keep_depth:
+        depth_keys = [
+            k for k, ft in list(dataset.meta.features.items())
+            if ft.get("dtype") in ("video", "image") and "depth" in k.lower()
+        ]
+        if depth_keys:
+            logging.info("Dropping unused depth features: %s", depth_keys)
+            for k in depth_keys:
+                del dataset.meta.info["features"][k]
+            if hasattr(dataset, "hf_dataset") and dataset.hf_dataset is not None:
+                hf_depth_cols = [k for k in depth_keys if k in dataset.hf_dataset.column_names]
+                if hf_depth_cols:
+                    dataset.hf_dataset = dataset.hf_dataset.remove_columns(hf_depth_cols)
+
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 

@@ -47,12 +47,19 @@ def init_logging():
     logger.handlers[0].setFormatter(formatter)
 
 
-def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
+def init_wandb(
+    config: _config.TrainConfig,
+    *,
+    checkpoint_dir: epath.Path,
+    resuming: bool,
+    log_code: bool = False,
+    enabled: bool = True,
+):
     if not enabled:
         wandb.init(mode="disabled")
         return
 
-    ckpt_dir = config.checkpoint_dir
+    ckpt_dir = checkpoint_dir
     if not ckpt_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
     if resuming:
@@ -209,13 +216,13 @@ def main(config: _config.TrainConfig):
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
+    checkpoint_manager, resuming, checkpoint_dir = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
     )
-    init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    init_wandb(config, checkpoint_dir=checkpoint_dir, resuming=resuming, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(
         config,
